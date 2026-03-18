@@ -1,4 +1,5 @@
+# Secrets
 .env
+# Database
 db.json
 __pycache__/
-*.pyc

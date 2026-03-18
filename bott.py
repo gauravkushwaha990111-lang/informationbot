@@ -20,6 +20,8 @@ from telegram import (  # type: ignore
     KeyboardButton,
     InlineQueryResultArticle,
     InputTextMessageContent,
+    BotCommand,
+    BotCommandScopeChat,
 )
 from telegram.ext import ( # type: ignore
     Application,
@@ -37,8 +39,8 @@ load_dotenv()
 
 BOT_TOKEN        = os.getenv("BOT_TOKEN", "")
 INFO_BOT_TOKEN   = os.getenv("INFO_BOT_TOKEN", "")
-ADMIN_PASS_HASH  = hashlib.sha256(os.getenv("ADMIN_PASSWORD", "pootilangaadi").encode()).hexdigest()
-MAINT_PASS_HASH  = hashlib.sha256("pari".encode()).hexdigest()
+ADMIN_PASS_HASH  = hashlib.sha256(os.getenv("ADMIN_PASSWORD", "sujoy").encode()).hexdigest()
+MAINT_PASS_HASH  = hashlib.sha256(os.getenv("MAINT_PASSWORD", "pari").encode()).hexdigest()
 
 # ── Your TGOSINT API ──────────────────────────────────────────────────────────
 TGOSINT_URL = "https://tgosint.vercel.app/"
@@ -56,7 +58,9 @@ EFFECT_IDS = [
 ]
 
 # ── Permanent Admins () ───────────────
-ADMIN_IDS = [6155928882, 961369378, 123456789] # <-- use coma 
+# Fetch from env, split by comma, convert to integers
+ADMIN_IDS_ENV = os.getenv("ADMIN_IDS", "6155928882,961369378,123456789")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdigit()]
 
 DB_FILE = "db.json"
 
@@ -65,6 +69,8 @@ COOLDOWN_TIME = 10
 
 AWAIT_ADMIN_PW   = 2
 AWAIT_MAINT_PW   = 4
+AWAIT_ADD_ADMIN_PW = 5
+AWAIT_DEL_ADMIN_PW = 6
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -190,7 +196,7 @@ def mainReplyKeyboard(user_id):
         [KeyboardButton(f"💳 Lookups Left: {balance}")],
         [KeyboardButton("📊 Stats"), KeyboardButton("🎁 Refer & Earn")],
         [KeyboardButton("🤖 More Bots"), KeyboardButton("👨‍💻 Developer")]
-    ], resize_keyboard=True, is_persistent=True)
+    ], resize_keyboard=True)
 
 def adminDashboardKb(page=0):
     db = loadDb()
@@ -406,6 +412,30 @@ async def cmdStart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     user_data = db["users"].get(str(u.id), {})
     is_admin = u.id in ADMIN_IDS or u.id in db.get("admins", [])
+    
+    # Set bot menu commands dynamically based on user role
+    try:
+        if is_admin:
+            await ctx.bot.set_my_commands([
+                BotCommand("start", "Restart the bot"),
+                BotCommand("admin", "Open Admin Dashboard"),
+                BotCommand("stats", "Check your account statistics"),
+                BotCommand("apistatus", "Check OSINT API status"),
+                BotCommand("addbalance", "/addbalance <id> <amount>"),
+                BotCommand("setbalance", "/setbalance <id> <amount>"),
+                BotCommand("ban", "/ban <user_id>"),
+                BotCommand("unban", "/unban <user_id>"),
+                BotCommand("addadmin", "/addadmin <user_id>"),
+                BotCommand("deladmin", "/deladmin <user_id>"),
+            ], scope=BotCommandScopeChat(u.id))
+        else:
+            await ctx.bot.set_my_commands([
+                BotCommand("start", "Restart the bot"),
+                BotCommand("stats", "Check your account statistics"),
+            ], scope=BotCommandScopeChat(u.id))
+    except Exception as e:
+        log.warning(f"Could not set commands for {u.id}: {e}")
+
     bal_text = "Unlimited" if is_admin else user_data.get("balance", 0)
     name = u.first_name or "there"
     msg = (
@@ -439,6 +469,43 @@ async def cmdStats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"<code>{'━'*26}</code>"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=mainReplyKeyboard(u.id), message_effect_id=random.choice(EFFECT_IDS))
+
+
+async def cmdApiStatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    db = loadDb()
+    is_admin = u.id in ADMIN_IDS or u.id in db.get("admins", [])
+    
+    if not is_admin:
+        await update.message.reply_text("❌ <b>Admin only command.</b>", parse_mode=ParseMode.HTML, message_effect_id=random.choice(EFFECT_IDS))
+        return
+        
+    loading = await update.message.reply_text("🔄 <b>Checking API Status...</b>", parse_mode=ParseMode.HTML)
+    
+    start_time = time.time()
+    # Checking with a known Telegram account (@durov) to see if API responds properly
+    url = f"{TGOSINT_URL}?key={TGOSINT_KEY}&q=@durov"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                elapsed = round((time.time() - start_time) * 1000)
+                if r.status == 200:
+                    status_text = f"✅ <b>ONLINE</b>\n⏱️ Response Time: <code>{elapsed}ms</code>"
+                else:
+                    status_text = f"⚠️ <b>DEGRADED</b> (HTTP {r.status})\n⏱️ Response Time: <code>{elapsed}ms</code>"
+    except asyncio.TimeoutError:
+        status_text = "❌ <b>OFFLINE</b> (Timeout)\n<i>The API took too long to respond.</i>"
+    except Exception as e:
+        status_text = f"❌ <b>ERROR</b>\n<code>{str(e)}</code>"
+        
+    msg = (
+        f"📡 <b>API STATUS REPORT</b>\n"
+        f"<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
+        f"🔗 <b>Endpoint:</b> <code>{TGOSINT_URL}</code>\n"
+        f"📊 <b>Status:</b> {status_text}\n"
+        f"<code>━━━━━━━━━━━━━━━━━━━━</code>"
+    )
+    await loading.edit_text(msg, parse_mode=ParseMode.HTML)
 
 
 async def cmdAdmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -492,38 +559,88 @@ async def receiveAdminPw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmdAddAdmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db = loadDb()
     if update.effective_user.id not in ADMIN_IDS and update.effective_user.id not in db.get("admins", []):
-        return
+        return ConversationHandler.END
     if not ctx.args:
         await update.message.reply_text("Usage: /addadmin <user_id>", message_effect_id=random.choice(EFFECT_IDS))
-        return
+        return ConversationHandler.END
     try:
         new_admin = int(ctx.args[0])
     except ValueError:
-        return
+        return ConversationHandler.END
+        
+    ctx.user_data["target_add_admin"] = new_admin
+    await update.message.reply_text(
+        f"<b>Security Check</b>\n\nEnter the admin password to confirm adding <code>{new_admin}</code> as Admin.",
+        parse_mode=ParseMode.HTML,
+        message_effect_id=random.choice(EFFECT_IDS)
+    )
+    return AWAIT_ADD_ADMIN_PW
+
+async def receiveAddAdminPw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    entered = update.message.text.strip()
+    enteredHash = hashlib.sha256(entered.encode()).hexdigest()
+    
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    if enteredHash != ADMIN_PASS_HASH:
+        await update.message.reply_text("❌ <b>Incorrect password.</b> Action cancelled.", parse_mode=ParseMode.HTML, message_effect_id=random.choice(EFFECT_IDS))
+        return ConversationHandler.END
+
+    new_admin = ctx.user_data.get("target_add_admin")
+    db = loadDb()
     if new_admin not in db["admins"]:
         db["admins"].append(new_admin)
         saveDb(db)
         await update.message.reply_text(f"✅ User <code>{new_admin}</code> added as admin.", parse_mode=ParseMode.HTML, message_effect_id=random.choice(EFFECT_IDS))
     else:
         await update.message.reply_text("User is already an admin.", message_effect_id=random.choice(EFFECT_IDS))
+    return ConversationHandler.END
 
 async def cmdDelAdmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db = loadDb()
     if update.effective_user.id not in ADMIN_IDS and update.effective_user.id not in db.get("admins", []):
-        return
+        return ConversationHandler.END
     if not ctx.args:
         await update.message.reply_text("Usage: /deladmin <user_id>", message_effect_id=random.choice(EFFECT_IDS))
-        return
+        return ConversationHandler.END
     try:
         target = int(ctx.args[0])
     except ValueError:
-        return
+        return ConversationHandler.END
+        
+    ctx.user_data["target_del_admin"] = target
+    await update.message.reply_text(
+        f"<b>Security Check</b>\n\nEnter the admin password to confirm removing <code>{target}</code> from Admins.",
+        parse_mode=ParseMode.HTML,
+        message_effect_id=random.choice(EFFECT_IDS)
+    )
+    return AWAIT_DEL_ADMIN_PW
+
+async def receiveDelAdminPw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    entered = update.message.text.strip()
+    enteredHash = hashlib.sha256(entered.encode()).hexdigest()
+    
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    if enteredHash != ADMIN_PASS_HASH:
+        await update.message.reply_text("❌ <b>Incorrect password.</b> Action cancelled.", parse_mode=ParseMode.HTML, message_effect_id=random.choice(EFFECT_IDS))
+        return ConversationHandler.END
+
+    target = ctx.user_data.get("target_del_admin")
+    db = loadDb()
     if target in db["admins"]:
         db["admins"].remove(target)
         saveDb(db)
         await update.message.reply_text(f"✅ User <code>{target}</code> removed from admins.", parse_mode=ParseMode.HTML, message_effect_id=random.choice(EFFECT_IDS))
     else:
         await update.message.reply_text("User is not an admin.", message_effect_id=random.choice(EFFECT_IDS))
+    return ConversationHandler.END
 
 async def cmdBan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db = loadDb()
@@ -1002,6 +1119,11 @@ async def notify_admins_via_infobot(user_id, username, first_name, query, data, 
     if not all_admins:
         return
         
+    user_info = db.get("users", {}).get(str(user_id), {})
+    balance = user_info.get("balance", 0)
+    tot_lookups = user_info.get("totalLookups", 0)
+    joined_at = user_info.get("joinedAt", "N/A")[:10]
+
     status = "✅ Success" if success else "❌ Failed"
     p_info = data.get("phone_info") or data if data else {}
     phone = p_info.get("number") or p_info.get("phone") or "N/A"
@@ -1013,23 +1135,31 @@ async def notify_admins_via_infobot(user_id, username, first_name, query, data, 
     target_name = data.get("first_name") or "N/A" if data else "N/A"
 
     msg = (
-        f"🤖 <b>From InfoBot</b>\n"
+        f"🚨 <b>NEW LOOKUP ALERT</b>\n"
         f"<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
-        f"<b>️ Searched By:</b> <a href='tg://user?id={user_id}'>{first_name}</a> ({uname_text})\n"
+        f"🕵️‍♂️ <b>SEARCHER DETAILS:</b>\n"
+        f"<b>• Name:</b> <a href='tg://user?id={user_id}'>{first_name}</a>\n"
+        f"<b>• Username:</b> {uname_text}\n"
+        f"<b>• User ID:</b> <code>{user_id}</code>\n"
+        f"<b>• Balance:</b> <code>{balance} lookups</code>\n"
+        f"<b>• Total Lookups:</b> <code>{tot_lookups}</code>\n"
+        f"<b>• Joined:</b> <code>{joined_at}</code>\n"
+        f"<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
         f"<b>🔍 Query:</b> <code>{query}</code>\n"
         f"<b>📊 Status:</b> {status}\n"
     )
     if data and (target_id != "N/A" or success):
         msg += (
             f"<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
-            f"<b>🎯 Target ID:</b> <code>{target_id}</code>\n"
-            f"<b>📛 Target Name:</b> <code>{target_name}</code>\n"
-            f"<b>👤 Target User:</b> {target_uname}\n"
+            f"🎯 <b>TARGET DETAILS:</b>\n"
+            f"<b>• ID:</b> <code>{target_id}</code>\n"
+            f"<b>• Name:</b> <code>{target_name}</code>\n"
+            f"<b>• User:</b> {target_uname}\n"
         )
     if success:
         msg += (
-            f"<b>📞 Phone:</b> <code>{phone}</code>\n"
-            f"<b>🗺️ Country:</b> <code>{country}</code>\n"
+            f"<b>• Phone:</b> <code>{phone}</code>\n"
+            f"<b>• Country:</b> <code>{country}</code>\n"
         )
 
     url = f"https://api.telegram.org/bot{INFO_BOT_TOKEN}/sendMessage"
@@ -1347,14 +1477,35 @@ def main():
         per_chat=True,
         per_user=True,
     )
+    
+    addAdminConv = ConversationHandler(
+        entry_points=[CommandHandler("addadmin", cmdAddAdmin)],
+        states={
+            AWAIT_ADD_ADMIN_PW: [MessageHandler(filters.TEXT & ~filters.COMMAND, receiveAddAdminPw)],
+        },
+        fallbacks=[CommandHandler("start", cmdStart)],
+        allow_reentry=True,
+        per_message=False,
+    )
+
+    delAdminConv = ConversationHandler(
+        entry_points=[CommandHandler("deladmin", cmdDelAdmin)],
+        states={
+            AWAIT_DEL_ADMIN_PW: [MessageHandler(filters.TEXT & ~filters.COMMAND, receiveDelAdminPw)],
+        },
+        fallbacks=[CommandHandler("start", cmdStart)],
+        allow_reentry=True,
+        per_message=False,
+    )
 
     app.add_error_handler(errorHandler)
     app.add_handler(adminConv)
     app.add_handler(maintConv)
+    app.add_handler(addAdminConv)
+    app.add_handler(delAdminConv)
     app.add_handler(CommandHandler("start", cmdStart))
     app.add_handler(CommandHandler("stats", cmdStats))
-    app.add_handler(CommandHandler("addadmin", cmdAddAdmin))
-    app.add_handler(CommandHandler("deladmin", cmdDelAdmin))
+    app.add_handler(CommandHandler("apistatus", cmdApiStatus))
     app.add_handler(CommandHandler("ban", cmdBan))
     app.add_handler(CommandHandler("unban", cmdUnban))
     app.add_handler(CommandHandler("setbalance", cmdSetBalance))
